@@ -1,0 +1,20 @@
+## Data (raw + intermediates)
+/data/raw/
+/data/processed/
+
+## Outputs (keep submissions tracked)
+/outputs/*
+!/outputs/submissions/
+!/outputs/submissions/.gitkeep
+!/outputs/submissions/*.csv
+!/outputs/submissions/**
+
+## R / renv
+.Rhistory
+.RData
+.Rproj.user/
+renv/library/
+
+## OS/editor noise
+.DS_Store
+Thumbs.db
