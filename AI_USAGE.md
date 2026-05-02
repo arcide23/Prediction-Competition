@@ -287,4 +287,366 @@ Call `clean_reserved_codes()` in `process_meps()` after forbidden-variable remov
 Log categorical/continuous column counts, preserved negatives, converted negatives, and example column names.
 Run `make process` and verify target/ID preservation plus categorical labeling and continuous negative-to-NA behavior.
 - What I used: see src/data/process_meps.R
+- Verification: make process - hard runtime issues 
+
+***************************************************************************
+
+## 2026-04-30 — Address make process runtime issues
+- Tool: Cursor Agent 
+- Prompt: talked about how long it was taking when looping through variables to address missing/reserved codes
+- Output summary:
+Add stage outputs and skip logic in process_meps():
+Add optional arguments to process_meps() for runtime control:
+Improve observability:
+Add Makefile runtime targets:
+- What I used: 
+see src/data/process_meps.R
 - Verification: 
+ran make process
+
+**************************************************************************
+
+## 2026-05-02 — Create dummy variables   
+- Tool: cursor plan 
+- Prompt: 
+Update `src/data/process_meps.R` to add a final model-ready feature engineering step that one-hot encodes categorical variables and saves a reusable dataset
+Context:
+* The pipeline already performs:
+  1. variable harmonization across years
+  2. removal of forbidden variables
+  3. reserved code cleaning
+  4. classification of categorical vs continuous variables using `unique_threshold = 15`
+* This process is computationally expensive, so we want to run it once and cache the final result.
+Goal:
+Create a final model-ready dataset with one-hot encoded categorical variables and save it to:
+```r
+data/processed/meps_model_ready.rds
+```
+---
+### 1. Add caching behavior
+Modify `process_meps()`:
+```r
+process_meps <- function(force = FALSE) { ... }
+```
+* If `data/processed/meps_model_ready.rds` exists and `force = FALSE`:
+  * Load and return it immediately
+  * Print message: "Loading cached model-ready dataset"
+* If `force = TRUE`, rerun full pipeline and overwrite outputs
+---
+### 2. Protected columns
+Create helper:
+```r
+get_protected_columns <- function(df) { ... }
+```
+Include:
+* `TOTEXP`
+* `year`
+* ID-like columns:
+  * `DUID`, `DUPERSID`, `PID`
+  * any column matching `"ID$"`
+These should NOT be one-hot encoded.
+---
+### 3. One-hot encoding function
+Create:
+```r
+create_model_ready_data <- function(df, high_cardinality_threshold = 50) { ... }
+```
+#### Identify categorical variables:
+* columns already converted to factor
+* character columns
+* exclude protected columns
+#### Handle character columns:
+* convert to factor
+* add explicit NA level: `"missing"`
+---
+### 4. High-cardinality safeguard (IMPORTANT)
+Before encoding:
+* For each categorical variable:
+  * compute number of levels
+If:
+```r
+n_levels > high_cardinality_threshold
+```
+Then:
+* DO NOT one-hot encode that variable
+* Keep it as a factor (or drop if appropriate later)
+* Log it as skipped
+Print:
+* list of skipped high-cardinality variables
+---
+### 5. One-hot encoding
+* Use:
+```r
+model.matrix(~ . - 1, data = categorical_df)
+```
+* Do NOT include intercept
+* Only apply to selected categorical variables
+---
+### 6. Clean column name
+* Remove special characters
+* Replace spaces with `_`
+* Ensure valid R column names
+---
+### 7. Combine final dataset
+Final dataset should include:
+* Dummy variables from categorical encoding
+* Continuous numeric variables (unchanged, including NA)
+* `TOTEXP` (numeric target)
+* `year`
+* ID columns
+---
+### 8. Preserve outcome
+* Ensure:
+```r
+is.numeric(df$TOTEXP)
+```
+* Do NOT encode `TOTEXP`
+---
+### 9. Save outputs
+Save:
+```r
+data/processed/meps_processed.rds      # cleaned, not encoded
+data/processed/meps_model_ready.rds    # fully encoded
+```
+---
+### 10. Summary logging
+Print:
+* number of rows
+* number of columns before encoding
+* number of categorical variables encoded
+* number of variables skipped (high-cardinality)
+* number of dummy variables created
+* final number of columns
+* file path saved
+---
+### 11. Notes
+* Do NOT drop rows
+* Do NOT modify training/prediction scripts
+* Do NOT scale or impute yet
+* Keep code tidyverse-friendly and modular
+Add comment:
+```r
+# Future modeling should use data/processed/meps_model_ready.rds
+```
+---
+### Key idea:
+* `unique_threshold = 15` → identifies categorical variables
+* `high_cardinality_threshold = 50` → prevents feature explosion during one-hot encoding
+This ensures scalability and stability for large MEPS data.
+- Output summary:
+6 to dos, completed in order: 
+Add force argument and model-ready cache short-circuit in process_meps. Implement get_protected_columns(df) and ensure TOTEXP/year/ID protection. Implement create_model_ready_data() with char-to-factor conversion, missing level handling, high-cardinality skip, and one-hot encoding. 
+Add dummy-name sanitization for valid stable column names. 
+Save both cleaned and model-ready outputs and print required model-ready summary logs. 
+Run process twice and verify cache behavior, output files, and key integrity checks.
+- What I used: 
+see the process_meps.R file
+- Verification: 
+ran make process (error)
+
+***************************************************************************
+
+## 2026-05-02 — Address memory limit reached  
+- Tool: Cursor Agent 
+- Prompt: 
+The pipeline successfully completes reserved-code cleaning, but `create_model_ready_data()` fails with:
+```r
+vector memory limit of 16.0 Gb reached
+```
+This happens because `model.matrix()` is creating a huge dense one-hot matrix from 1,272 categorical columns.
+Please update `src/data/process_meps.R` to make model-ready encoding memory-safe.
+Required changes:
+1. Do NOT use dense `model.matrix()` for the full categorical set.
+2. Use sparse one-hot encoding instead:
+```r
+Matrix::sparse.model.matrix(~ . - 1, data = categorical_df)
+```
+3. Save the model-ready object as a list, not one giant dense data frame:
+```r
+model_ready <- list(
+  y = df$TOTEXP,
+  ids = df[, protected_cols, drop = FALSE],
+  numeric = numeric_df,
+  x_sparse = sparse_dummy_matrix,
+  encoded_vars = encoded_vars,
+  skipped_high_cardinality_vars = skipped_vars,
+  metadata = summary_metadata
+)
+```
+4. Save this object to:
+```r
+data/processed/meps_model_ready.rds
+```
+5. Keep saving the cleaned non-encoded data frame to:
+```r
+data/processed/meps_processed.rds
+```
+6. Keep the high-cardinality safeguard:
+   * do not encode categorical variables with more than 50 levels
+   * log skipped variables
+7. Add a second safeguard:
+   * do not encode ID-like variables or identifier columns
+   * protected columns include `TOTEXP`, `year`, `DUID`, `DUPERSID`, `PID`, and anything matching `ID$`
+8. Add an optional argument:
+```r
+encoding = c("sparse", "none")
+```
+Default should be:
+```r
+encoding = "sparse"
+```
+If `encoding = "none"`, skip one-hot encoding and just save the cleaned data.
+9. Log:
+   * number of encoded categorical variables
+   * number skipped for high cardinality
+   * dimensions of sparse dummy matrix
+   * number of nonzero entries in sparse matrix
+   * final saved path
+10. Do not modify training or prediction scripts yet.
+Important:
+The final object does not need to be a normal data frame. A sparse model-ready object is better because dense one-hot encoding is too large for this MEPS dataset.
+- Output summary:
+I’m updating process_meps.R now to switch model-ready encoding to sparse, keep high-cardinality and protected-column safeguards, and support encoding = c("sparse","none") with memory-safe output structure.
+- What I used: 
+see process_meps.R
+- Verification: 
+ran make process
+
+***************************************************************************
+
+## 2026-05-02 — Remove weight variables and streamline make process  
+- Tool: Cursor Agent 
+- Prompt: 
+Update `src/data/process_meps.R` so we can remove survey weight variables from the already-created `data/processed/meps_model_ready.rds` object and prevent `make process` from rerunning the full cleaning pipeline.
+Context:
+* `data/processed/meps_model_ready.rds` already exists.
+* It is a list with:
+  * `y`
+  * `ids`
+  * `numeric`
+  * `x_sparse`
+  * `encoded_vars`
+  * `skipped_high_cardinality_vars`
+  * `metadata`
+* The current issue is that survey weight variables remain inside `obj$numeric`, including patterns like:
+  * `FAMWT*`
+  * `SAQWT*`
+  * `DIABW*`
+  * `SDOHWT*`
+* We want to remove these from the cached model-ready object without rerunning reserved-code cleaning or full one-hot encoding.
+Tasks:
+1. Add a helper function:
+```r
+get_forbidden_weight_patterns <- function() {
+  c(
+    "^PERWT",
+    "^BRR",
+    "^REPWT",
+    "^FAMWT",
+    "^SAQWT",
+    "^DIABW",
+    "^SDOHWT"
+  )
+}
+```
+2. Add a helper function:
+```r
+remove_weights_from_model_ready_cache <- function(
+  model_ready_path = "data/processed/meps_model_ready.rds"
+) { ... }
+```
+This function should:
+* load the existing RDS object
+* check that it is a list
+* remove any matching weight variables from `obj$numeric`
+* also remove matching weight variables from `obj$ids` if they appear there
+* also remove matching names from `obj$encoded_vars` if present
+* do NOT modify `obj$y`
+* do NOT modify `obj$x_sparse` unless weight-related dummy columns exist in its column names
+* if `x_sparse` has column names matching the weight patterns, drop those columns safely
+* update metadata with:
+  * `weights_removed = TRUE`
+  * `removed_weight_vars = removed_vars`
+  * `weights_removed_timestamp = Sys.time()`
+* overwrite `data/processed/meps_model_ready.rds`
+* print the removed variables
+3. Update forbidden-variable removal logic for future full reruns:
+* Make sure the same weight patterns are dropped before model-ready encoding.
+* This prevents weights from reappearing if `force = TRUE` is ever used.
+4. Fix model-ready cache behavior in `process_meps()`:
+* If `data/processed/meps_model_ready.rds` exists and `force = FALSE`, load and return it immediately.
+* Do not reject the cache just because of encoding metadata naming.
+* Accept the cache if:
+  * it is a list
+  * it contains `y`
+  * it contains `numeric`
+  * it contains `x_sparse`
+  * `x_sparse` inherits from `"sparseMatrix"`
+* Print:
+```r
+"Loading cached model-ready dataset"
+```
+* Then return the object.
+* Do not run `load_raw`, `clean_reserved_codes`, or `create_model_ready_data`.
+5. Add a small validation helper:
+```r
+validate_no_weight_vars <- function(obj) { ... }
+```
+It should check:
+* `obj$numeric`
+* `obj$ids`
+* `obj$encoded_vars`
+* `colnames(obj$x_sparse)`
+and print whether any forbidden weight variables remain.
+6. After implementing, run only:
+```r
+source("src/data/process_meps.R")
+remove_weights_from_model_ready_cache()
+obj <- readRDS("data/processed/meps_model_ready.rds")
+validate_no_weight_vars(obj)
+```
+Do NOT run `process_meps(force = TRUE)`.
+7. After this, `make process` should simply load the cached model-ready dataset and exit quickly.
+- Output summary:
+removed weights and streamlined make process 
+- What I used: 
+see src/data/process_meps.R
+- Verification: 
+ran make process, it went very quick and read the final dataset
+
+***************************************************************************
+
+## 2026-05-02 — Update README for data cleaning   
+- Tool: cursor agent 
+- Prompt: 
+Update the README to include a new section describing the data cleaning and feature engineering pipeline.
+High-level guidance:
+* Add a section titled:
+  `## Data Cleaning & Feature Engineering`
+* Write this section based on the actual implementation in:
+  * `src/data/process_meps.R`
+* The description should:
+  * follow the logical order of the pipeline (loading → cleaning → feature engineering → final output)
+  * explain key decisions at a high level (not code-level detail)
+  * reflect the actual structure of the model-ready object (`meps_model_ready.rds`)
+* Include short subsections or clearly separated paragraphs covering:
+  * how multiple years of MEPS data are combined
+  * how variables are standardized across years
+  * how forbidden variables are handled
+  * how missing/reserved codes are treated
+  * how categorical variables are transformed (mention sparse encoding at a high level)
+  * what the final dataset looks like and where it is stored
+* Keep the tone:
+  * professional
+  * concise
+  * readable for someone reviewing the project (e.g., recruiter or professor)
+* Avoid:
+  * copying code
+  * long technical explanations
+  * overly detailed edge cases
+* Do NOT add modeling details yet (we will add a separate modeling section later)
+Goal:
+A reader should be able to understand what transformations were applied to the data, why they were necessary, and how to access the final dataset, without reading the code.
+- Output summary: see README
+- What I used: see README
+- Verification: read over the README and iterated on my behalf 
